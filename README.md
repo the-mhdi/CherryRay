@@ -580,8 +580,8 @@ server and `'Y'` for server to client.
 Layout:
 
 ```
-cmd/muxserver      server: transports, channel specs, OPEN handling, forwarding
-cmd/muxclient      client: listeners, flows, connect/resume
+cmd/CherryRayServer      server: transports, channel specs, OPEN handling, forwarding
+cmd/CherryRayClient      client: listeners, flows, connect/resume
 internal/tunnel
   endpoint.go      NET//ADDR endpoints, transports, dialers
   open.go          OPEN request / status
