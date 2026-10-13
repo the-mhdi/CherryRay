@@ -1,13 +1,13 @@
-// Command muxclient connects to a muxserver and carries local traffic over
+// Command CherryRayClient connects to a CherryRayServer and carries local traffic over
 // one of its channels.
 //
-//	muxclient -tcp server:7000 -channel ssh -listen tcp//127.0.0.1:2222
-//	muxclient -udp server:7000 -channel dns -listen udp//127.0.0.1:5353
-//	muxclient -ip ip4:253@203.0.113.7 -channel app -listen unix///tmp/app.sock
-//	ssh -o ProxyCommand='muxclient -tcp server:7000 -channel ssh' host
-//	muxclient -tcp server:443 -tls -tls-pin HEX -psk-file key.txt -channel ssh -listen tcp//127.0.0.1:2222
-//	muxclient -raw -spoof-src 88.0.0.2 -raw-peer SERVER_IP -accept-src 77.0.0.1 -psk-file key.txt -channel web -listen tcp//127.0.0.1:8080
-//	muxclient -tcp server:80 -http -http-host cdn.example.com -http-path /video -channel ssh -listen tcp//127.0.0.1:2222
+//	client -tcp server:7000 -channel ssh -listen tcp//127.0.0.1:2222
+//	client -udp server:7000 -channel dns -listen udp//127.0.0.1:5353
+//	client -ip ip4:253@203.0.113.7 -channel app -listen unix///tmp/app.sock
+//	ssh -o ProxyCommand='client -tcp server:7000 -channel ssh' host
+//	client -tcp server:443 -tls -tls-pin HEX -psk-file key.txt -channel ssh -listen tcp//127.0.0.1:2222
+//	client -raw -spoof-src 88.0.0.2 -raw-peer SERVER_IP -accept-src 77.0.0.1 -psk-file key.txt -channel web -listen tcp//127.0.0.1:8080
+//	client -tcp server:80 -http -http-host cdn.example.com -http-path /video -channel ssh -listen tcp//127.0.0.1:2222
 //
 // Every accepted local connection (or, for packet listeners, every local
 // peer address) gets its own muxocket session, so connections never block
@@ -222,7 +222,7 @@ func flagSet(name string) bool {
 }
 
 func fatalUsage(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "muxclient: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "CherryRayClient: "+format+"\n", args...)
 	flag.Usage()
 	os.Exit(2)
 }
@@ -322,7 +322,7 @@ func finish(sess *muxocket.Session, ch *muxocket.Channel) {
 func (c *client) runStdio() int {
 	sess, ch, pipe, err := c.connect(tunnel.ModeStream)
 	if err != nil {
-		log.Printf("muxclient: %v", err)
+		log.Printf("CherryRayClient: %v", err)
 		return 1
 	}
 	// Not JoinStream: a blocked read on stdin can't be interrupted, so we
@@ -338,7 +338,7 @@ func (c *client) runStdio() int {
 	_, outErr := io.Copy(os.Stdout, pipe) // channel -> stdout until EOF
 	_ = os.Stdout.Close()
 	if outErr != nil {
-		log.Printf("muxclient: %v", outErr)
+		log.Printf("CherryRayClient: %v", outErr)
 		_ = sess.Close()
 		return 1
 	}
@@ -347,7 +347,7 @@ func (c *client) runStdio() int {
 	select {
 	case err := <-inDone:
 		if err != nil && !sess.IsClosed() {
-			log.Printf("muxclient: %v", err)
+			log.Printf("CherryRayClient: %v", err)
 		}
 	case <-ch.Done():
 	case <-sess.Done():

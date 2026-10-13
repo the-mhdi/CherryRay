@@ -1,12 +1,12 @@
-// Command muxserver accepts muxocket sessions over TCP, UDP or raw IP and
+// Command server accepts muxocket sessions over TCP, UDP or raw IP and
 // forwards every channel to a local or remote target.
 //
-//	muxserver -tcp :7000 -channels ssh=tcp//127.0.0.1:22,web=tcp//127.0.0.1:443
-//	muxserver -udp :7000 -channels dns -forward udp//1.1.1.1:53
-//	muxserver -ip ip4:253 -channels app -forward unix///run/app.sock
-//	muxserver -tcp :443 -tls -psk-file key.txt -encryption chacha20-poly1305 -channels ssh=tcp//127.0.0.1:22
-//	muxserver -raw -spoof-src 77.0.0.1 -raw-peer CLIENT_IP -accept-src 88.0.0.2 -psk-file key.txt -channels web=tcp//127.0.0.1:8080
-//	muxserver -tcp :80 -http -http-host cdn.example.com -http-path /video -channels ssh=tcp//127.0.0.1:22
+//	server -tcp :7000 -channels ssh=tcp//127.0.0.1:22,web=tcp//127.0.0.1:443
+//	server -udp :7000 -channels dns -forward udp//1.1.1.1:53
+//	server -ip ip4:253 -channels app -forward unix///run/app.sock
+//	server -tcp :443 -tls -psk-file key.txt -encryption chacha20-poly1305 -channels ssh=tcp//127.0.0.1:22
+//	server -raw -spoof-src 77.0.0.1 -raw-peer CLIENT_IP -accept-src 88.0.0.2 -psk-file key.txt -channels web=tcp//127.0.0.1:8080
+//	server -tcp :80 -http -http-host cdn.example.com -http-path /video -channels ssh=tcp//127.0.0.1:22
 //
 // For every accepted session the server opens each channel named in
 // -channels. A client uses one of them; when the client's first bytes (the
@@ -259,7 +259,7 @@ func flagSet(name string) bool {
 }
 
 func fatalUsage(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "muxserver: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "CherryRayServer: "+format+"\n", args...)
 	flag.Usage()
 	os.Exit(2)
 }

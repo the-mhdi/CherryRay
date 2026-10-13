@@ -14,12 +14,20 @@ UDP, raw IP or a two-way IP-spoofing raw transport that can pose as TCP.
 Optional extras:
 
 * end-to-end channel encryption with a post-quantum hybrid key exchange
+* a local **SOCKS5 proxy** (`-listen socks5//…`): the server dials whatever
+  destination each app asks for, within an allow/deny list
+* **session pooling**: many local connections share a few long-lived sessions
+* **WebSocket** and **HTTP/2** transports that pass CDNs and reverse proxies
+* **browser TLS fingerprints** (uTLS: Chrome, Firefox, Safari, …)
+* **probe fallback**: anything that isn't a CherryRay client is handed to a
+  real web server
+* **padding and timing obfuscation** of the stream (`-obfs`)
 * HTTP header camouflage
 * transparent session resumption when the network breaks
 
 ```
- local app ──► client ══════ transport (tcp / tls / udp / ip / raw) ══════► server ──► target
-              (-listen)        muxocket session, channel "ssh"             (-channels ssh=…)
+ local app ──► client ══════ transport (tcp / tls / ws / h2 / udp / ip / raw) ══════► server ──► target
+              (-listen)        muxocket session, channel "ssh"                      (-channels ssh=…)
 ```
 
 ---
@@ -33,29 +41,37 @@ Optional extras:
 5. [Transports](#transports)
 6. [TLS](#tls)
 7. [End-to-end encryption and PSK](#end-to-end-encryption-and-psk)
-8. [HTTP camouflage (`-http`)](#http-camouflage--http)
-9. [Raw spoofing transport (`-raw`, `-faketcp`)](#raw-spoofing-transport--raw--faketcp)
-10. [Datagram traffic](#datagram-traffic)
-11. [Reliability, MTU and resumption](#reliability-mtu-and-resumption)
-12. [Flag reference](#flag-reference)
-13. [Wire protocol](#wire-protocol)
-14. [Security notes](#security-notes)
-15. [Performance notes](#performance-notes)
-16. [Development](#development)
+8. [SOCKS5 proxy](#socks5-proxy)
+9. [Session pooling (`-pool`)](#session-pooling--pool)
+10. [WebSocket and HTTP/2 transports (`-ws`, `-h2`)](#websocket-and-http2-transports--ws--h2)
+11. [Browser TLS fingerprints (`-fingerprint`)](#browser-tls-fingerprints--fingerprint)
+12. [Probe fallback (`-fallback`)](#probe-fallback--fallback)
+13. [Padding and timing obfuscation (`-obfs`)](#padding-and-timing-obfuscation--obfs)
+14. [HTTP camouflage (`-http`)](#http-camouflage--http)
+15. [Raw spoofing transport (`-raw`, `-faketcp`)](#raw-spoofing-transport--raw--faketcp)
+16. [Datagram traffic](#datagram-traffic)
+17. [Reliability, MTU and resumption](#reliability-mtu-and-resumption)
+18. [Flag reference](#flag-reference)
+19. [Wire protocol](#wire-protocol)
+20. [Security notes](#security-notes)
+21. [Performance notes](#performance-notes)
+22. [Development](#development)
 
 ---
 
 ## Building
 
-You need Go 1.25 or newer.
+You need Go 1.26 or newer.
 
 ```sh
-go get github.com/the-mhdi/muxocket@latest   # once, see the note below
-go build ./cmd/muxserver ./cmd/muxclient
+go mod tidy          # fetches muxocket, uTLS and x/net (see the note below)
+go build ./cmd/CherryRayServer ./cmd/CherryRayClient
 ```
 
-The only other dependencies are `golang.org/x/crypto` (BLAKE2b,
-ChaCha20-Poly1305) and `golang.org/x/sys` (raw sockets).
+Dependencies: `golang.org/x/crypto` (BLAKE2b, ChaCha20-Poly1305),
+`golang.org/x/sys` (raw sockets), `golang.org/x/net/http2` (`-h2`) and
+`github.com/refraction-networking/utls` (`-fingerprint`, which pulls in
+`klauspost/compress` and `go-brrr` for certificate compression).
 
 ## Quick start
 
@@ -177,6 +193,12 @@ Exactly one transport is chosen on each side, and the two sides must match.
 | raw IP | `-ip ip4:253[@ADDR]` | `-ip ip4:253@SERVER` | IP protocol number of your choice; a 4-byte flow shim acts as a "port" |
 | raw IP spoofing | `-raw …` | `-raw …` | forged source addresses both ways; optional fake TCP headers (`-faketcp`) |
 | + HTTP camouflage | `-http` | `-http` | on top of TCP, TLS, or `-raw -faketcp` |
+| + WebSocket | `-ws /path` | `-ws /path` | real RFC 6455 upgrade; on TCP or TLS; passes CDNs, see [below](#websocket-and-http2-transports--ws--h2) |
+| + HTTP/2 | `-h2 /path` | `-h2 /path` | one streaming POST per connection; h2 over TLS or h2c |
+| + obfuscation | `-obfs` | `-obfs` | padding, jitter and cover traffic on any stream transport |
+
+Stream layers stack in this order, outermost first: TCP → TLS → one of
+`-http` / `-ws` / `-h2` → `-obfs` → muxocket.
 
 `-local IP` (client) fixes the transport's source address. That's needed
 for raw IP when both ends run on one host.
@@ -251,6 +273,211 @@ TCP, TLS).
   record, so an attacker can't cut a stream short with a forged FIN.
 
 ---
+
+## SOCKS5 proxy
+
+The client can act as a local SOCKS5 proxy. Each CONNECT becomes its own
+channel, and the server dials the destination the app asked for, so
+browsers and apps work without a channel per service.
+
+```sh
+# server: a socks5 channel; destinations limited by -socks-allow-dst
+server -tcp :443 -tls -psk-file key.txt -channels px=socks5
+
+# client: SOCKS5 on 127.0.0.1:1080, with username/password (RFC 1929)
+client -tcp server:443 -tls -tls-pin HEX -psk-file key.txt -channel px \
+       -listen socks5//127.0.0.1:1080 -socks-user me -socks-password secret -pool 4
+
+curl --socks5-hostname me:secret@127.0.0.1:1080 https://example.com/
+```
+
+* `-forward socks5` (or `-channels px=socks5`) marks a channel as dynamic.
+  Only SOCKS clients can use it, and a SOCKS client can only use such a
+  channel.
+* The address types IPv4, IPv6 and domain names all work. Names are resolved
+  **on the server** (no DNS leak on the client side). Only CONNECT is
+  supported; BIND and UDP ASSOCIATE get reply `07`.
+* Without `-socks-user`, the proxy needs no auth. Then bind it to loopback
+  only.
+* Server errors map to SOCKS reply codes: forbidden → `02`, refused → `05`,
+  host unreachable or timeout → `04`, network unreachable → `03`.
+
+**`-socks-allow-dst`** is an ordered, comma-separated rule list. The first
+match wins, and a destination that matches nothing is denied:
+
+| rule | matches |
+|---|---|
+| `10.0.0.0/8`, `2001:db8::/32` | addresses in the CIDR |
+| `1.2.3.4` | one address |
+| `example.com` | exactly that name |
+| `.example.com` | the name and all its subdomains |
+| `…:443` (any rule) | only that port |
+| `*` | everything |
+| `!rule` | deny instead of allow |
+
+Example: `-socks-allow-dst '!10.1.2.3,10.0.0.0/8:443,.example.com,!*'`.
+Without the flag, the public internet is allowed but loopback, RFC 1918,
+CGNAT, link-local (including cloud metadata `169.254.169.254`), ULA and
+multicast are not, so a client can't reach the server's own network. Use
+`-socks-allow-dst '*'` to allow everything. Every resolved address of a
+name is checked and then dialed directly, so a DNS answer can't change
+between the check and the connect.
+
+
+## WebSocket and HTTP/2 transports (`-ws`, `-h2`)
+
+Both put the muxocket stream inside traffic that HTTP infrastructure
+understands. A CDN (Cloudflare and others) or a reverse proxy (nginx,
+Caddy) can then sit in front of the server, so the server's address stays
+hidden.
+
+**WebSocket (`-ws /path`).** Every transport connection starts with a
+genuine RFC 6455 upgrade (`Sec-WebSocket-Key`/`Accept`, version 13). Then
+the stream travels in binary frames, masked from the client as the RFC
+requires. The client waits for the `101` response before it sends data, so
+proxies that don't forward early data work too. The server accepts only the
+configured path. Anything else gets `404`/`400`, or goes to `-fallback`.
+
+```sh
+server -tcp 127.0.0.1:8443 -ws /chat -psk-file key.txt -channels px=socks5
+# nginx/Caddy/CDN terminates TLS for cdn.example.com and proxies /chat to 127.0.0.1:8443
+client -tcp cdn.example.com:443 -tls -sni cdn.example.com -ws /chat -fingerprint chrome \
+       -alpn http/1.1 -psk-file key.txt -channel px -listen socks5//127.0.0.1:1080 -pool 4
+```
+
+**HTTP/2 (`-h2 /path`).** Every transport connection is a real HTTP/2
+connection that carries one long POST, similar to gRPC streaming. The
+request body is the client→server stream and the response body the
+server→client stream. It uses TLS with ALPN `h2` (set automatically on both
+ends unless you give `-alpn`), or cleartext h2c with prior knowledge
+without `-tls`. Requests for other paths, and TLS clients that don't
+negotiate `h2`, are reverse-proxied to `-fallback` or get `404`.
+
+```sh
+server -tcp :443 -tls -tls-cert cert.pem -tls-key key.pem -h2 /api/stream -fallback tcp//127.0.0.1:8080 -channels web=tcp//127.0.0.1:80
+client -tcp example.com:443 -tls -h2 /api/stream -fingerprint chrome -channel web -listen tcp//127.0.0.1:8080
+```
+
+`-host NAME` (client) sets the `Host` header / `:authority` for both. The
+default is `-sni`, else the host from `-tcp`. `-ws` and `-h2` can't be
+combined with each other or with `-http`, but both work with `-tls`,
+`-fingerprint`, `-obfs`, `-pool` and `-fallback`.
+
+## Browser TLS fingerprints (`-fingerprint`)
+
+Go's own TLS ClientHello is easy to recognise. Its cipher suites,
+extensions and their order don't match any browser. `-fingerprint NAME`
+(client, with `-tls`) sends a real browser's ClientHello using
+[uTLS](https://github.com/refraction-networking/utls). This includes GREASE
+values, key shares, extension order and ALPS:
+
+| name | ClientHello of |
+|---|---|
+| `chrome` | current Chrome |
+| `firefox` | current Firefox |
+| `safari` | current Safari (macOS) |
+| `ios` | Safari on iOS |
+| `edge` | Edge |
+| `random` | a randomized, browser-like hello (new per connection) |
+
+Certificate verification, `-tls-pin`, `-tls-ca`, `-sni` and client
+certificates work exactly as with plain `-tls`. The server needs nothing
+special. Two things to keep in mind:
+
+* The browser's ALPN list is replaced by `-alpn`. The default `muxtun/1`
+  would stand out, so use the browser's own list on **both** ends:
+  `-alpn h2,http/1.1` (with `-ws` use `-alpn http/1.1`; `-h2` sets `h2`
+  automatically).
+* The TLS versions offered come from the fingerprint. The fingerprints
+  above all offer TLS 1.3. `random` is redrawn until it offers what
+  `-tlsversion` requires.
+
+## Probe fallback (`-fallback`)
+
+Censors confirm a proxy by connecting to it themselves and seeing how it
+reacts. With `-fallback NET//ADDR` (server, `-tcp` transports) every
+connection is checked before muxocket sees it. The server reads the first
+muxocket handshake message through all the stream layers (`-http`, `-ws`,
+`-obfs`) and verifies its Ed25519 signature. Anything else (a browser, a
+scanner, a replayed or corrupted header) is connected to the fallback
+target along with every byte already read from it. The port then behaves
+exactly like the web server behind it.
+
+```sh
+server -tcp :443 -tls -tls-cert cert.pem -tls-key key.pem -fallback tcp//127.0.0.1:8080 -channels ssh=tcp//127.0.0.1:22
+curl https://example.com/      # → served by the web server on :8080
+```
+
+* While a connection is being checked, nothing it causes is sent (no
+  `-http` response, no error page, no `-obfs` cover traffic). A probe only
+  ever sees the fallback's bytes.
+* With `-tls`, the fallback gets the **decrypted** stream, as with Trojan or
+  Xray, so it is a plain HTTP server. With `-fallback` the server also
+  accepts ALPN `http/1.1` (unless `-alpn` is given), because rejecting a
+  browser's ALPN would give it away.
+* A real client sends its handshake right away. A connection that sends
+  something and then pauses for 750 ms (like a browser waiting for a
+  response) is handed over at that point. A connection that sends nothing
+  is closed after 10 s.
+* `-ws`: a correct upgrade to the secret path gets `101`, and after that it
+  can't be handed over any more. Every other request goes to the fallback.
+  `-h2`: other paths are reverse-proxied per request (HTTP/1.1 to the
+  fallback). Non-`h2` TLS clients and non-HTTP/2 cleartext clients are
+  handed over whole.
+* No client changes are needed.
+
+## Padding and timing obfuscation (`-obfs`)
+
+muxocket frames, the OPEN request and the key exchange have fixed sizes,
+and length-pattern classifiers pick up on that. `-obfs` (on both ends, any
+stream transport) wraps the stream in a light record layer:
+
+```
+dataLen(2) | padLen(1) | data | random padding
+```
+
+| flag | default | effect |
+|---|---|---|
+| `-obfs` | off | enable the record layer (must match on both ends) |
+| `-obfs-pad MIN-MAX` | `0-255` | random padding per record; `0-0` turns padding off |
+| `-obfs-jitter D` | `0` | up to D of random delay before each write |
+| `-obfs-chaff D` | `0` (off) | send a cover-traffic record after D of idleness |
+
+Records with `dataLen = 0` are chaff and are dropped by the receiver. Only
+`-obfs` itself has to match. Padding, jitter and chaff apply to each
+direction separately and may differ between the ends. This is
+obfuscation, not secrecy: use `-tls` and/or `-encryption` for that. The
+layer sits innermost, right under muxocket, inside `-http`/`-ws`/`-h2`.
+
+## Session pooling (`-pool`)
+
+By default every local connection gets its own session, and each one pays
+for a transport connection, a TLS handshake and a muxocket handshake. With
+`-pool N` the client keeps up to N long-lived sessions and opens one
+**channel** per local connection on them. Nothing changes on the server:
+every server supports pooled clients.
+
+```sh
+client -tcp server:443 -tls -tls-pin HEX -channel web -listen tcp//127.0.0.1:8080 -pool 4
+```
+
+* A new connection goes to the least busy session. When every session is
+  busy and there are fewer than N, another one is dialed in the background.
+* `-pool-idle D` (default `5m`) closes a session that has carried nothing
+  for that long. The server closes pooled sessions that have been idle for
+  10 minutes.
+* It works with every transport, encryption (each channel still has its own
+  key exchange) and SOCKS5. It needs `-listen`, because stdin/stdout is a
+  single connection.
+* Fewer handshakes mean lower latency for short connections, and fewer
+  distinctive handshakes on the wire.
+
+How it works: muxocket has no "open channel" frame, so the server opens a
+control channel (`zz`) in every session. The client announces each new
+slot label (`zz0000`, `zz0001`, …, never reused within a session) and the
+server channel it wants on the control channel, then opens the slot and
+sends the usual OPEN request. Channel names starting with `zz` are
+therefore reserved.
 
 ## HTTP camouflage (`-http`)
 
@@ -429,7 +656,9 @@ usage: server (-tcp ADDR | -udp ADDR | -ip ip4:PROTO[@ADDR] | -raw …) [-channe
 | `-reliable auto\|on\|off` | `auto` | retransmission/ordering |
 | **channels** | | |
 | `-channels NAME[=NET//ADDR],…` | `tunnel` | channels opened in every session |
-| `-forward NET//ADDR` | | default target for channels without one |
+| `-forward NET//ADDR` | | default target for channels without one; `socks5` for SOCKS clients |
+| `-socks-allow-dst RULES` | public internet only | destinations socks5 channels may reach (see [SOCKS5](#socks5-proxy)) |
+| `-fallback NET//ADDR` | | hand non-CherryRay connections to this web server |
 | `-dial-timeout D` | `10s` | timeout for dialing a target |
 | `-open-timeout D` | `15s` | close sessions that open no channel (also bounds the key exchange) |
 | `-idle D` | `2m` | end idle datagram flows |
@@ -442,6 +671,12 @@ usage: server (-tcp ADDR | -udp ADDR | -ip ip4:PROTO[@ADDR] | -raw …) [-channe
 | `-tls-client-ca F` | | require client certificates (mTLS) |
 | `-tlsversion V` | `1.3` | `1.1`/`1.2`/`1.3` or `MIN-MAX` |
 | `-sni NAMES` | | accepted SNI names; added to a generated certificate |
+| `-alpn LIST` | `muxtun/1` (`h2` with `-h2`; `+http/1.1` with `-fallback`) | accepted ALPN protocols |
+| **WebSocket / HTTP/2** | | |
+| `-ws PATH` | | WebSocket transport at this path |
+| `-h2 PATH` | | HTTP/2 transport at this path |
+| **obfuscation** | | |
+| `-obfs`, `-obfs-pad`, `-obfs-jitter`, `-obfs-chaff` | off | see [`-obfs`](#padding-and-timing-obfuscation--obfs) |
 | **HTTP camouflage** | | |
 | `-http` | off | require/answer fake HTTP headers |
 | `-http-host NAMES` | any | accepted Host values |
@@ -476,7 +711,10 @@ usage: client (-tcp ADDR | -udp ADDR | -ip ip4:PROTO@ADDR | -raw …) [-channel 
 | `-dial-timeout D` | `10s` | connect + handshake + open timeout |
 | **local side** | | |
 | `-channel NAME` | `tunnel` | server channel to use |
-| `-listen NET//ADDR` | stdin/stdout | local listener |
+| `-listen NET//ADDR` | stdin/stdout | local listener; `socks5//ADDR` for a SOCKS5 proxy |
+| `-socks-user U` / `-socks-password P` | no auth | SOCKS5 username/password (RFC 1929) |
+| `-pool N` | `0` (off) | share up to N sessions between local connections |
+| `-pool-idle D` | `5m` | close a pooled session idle this long |
 | `-idle D` | `2m` | end idle datagram flows |
 | **encryption** | | |
 | `-encryption SUITE` | chacha20-poly1305 with PSK, else none | channel cipher |
@@ -490,6 +728,14 @@ usage: client (-tcp ADDR | -udp ADDR | -ip ip4:PROTO@ADDR | -raw …) [-channel 
 | `-tls-cert F` / `-tls-key F` | | client certificate (mTLS) |
 | `-tlsversion V` | `1.3` | version or range |
 | `-tls-insecure` | off | don't verify (testing only) |
+| `-alpn LIST` | `muxtun/1` (`h2` with `-h2`) | ALPN protocols offered |
+| `-fingerprint NAME` | Go's own | browser ClientHello: `chrome`, `firefox`, `safari`, `ios`, `edge`, `random` |
+| **WebSocket / HTTP/2** | | |
+| `-ws PATH` | | WebSocket transport at this path |
+| `-h2 PATH` | | HTTP/2 transport at this path |
+| `-host NAME` | `-sni`, else server host | Host / `:authority` for `-ws`/`-h2` |
+| **obfuscation** | | |
+| `-obfs`, `-obfs-pad`, `-obfs-jitter`, `-obfs-chaff` | off | see [`-obfs`](#padding-and-timing-obfuscation--obfs) |
 | **HTTP camouflage** | | |
 | `-http` | off | send fake HTTP headers |
 | `-http-host NAMES` | `-sni`, else server host | Host header candidates |
@@ -500,8 +746,10 @@ usage: client (-tcp ADDR | -udp ADDR | -ip ip4:PROTO@ADDR | -raw …) [-channel 
 | `-v` | off | verbose logging |
 
 Flags that only make sense together are checked. For example, `-tls-*`
-needs `-tls`, `-http-*` needs `-http`, `-faketcp` needs `-raw`, and `-http`
-over `-raw` needs `-faketcp`.
+and `-fingerprint` need `-tls`, `-http-*` needs `-http`, `-faketcp` needs
+`-raw`, `-http` over `-raw` needs `-faketcp`, `-socks-*` needs a socks5
+listener or channel, `-pool-idle` needs `-pool`, and `-ws`/`-h2`/`-http`
+exclude each other.
 
 ---
 
@@ -510,10 +758,12 @@ over `-raw` needs `-faketcp`.
 Layers, outermost first (each optional layer only when enabled):
 
 ```
-[IP + fake TCP + flow shim]  or  TCP [+ TLS]  or  UDP  or  IP + flow shim
-  [HTTP header (first bytes / first packets)]
-    muxocket frames   length(4) flag(1) channelID(4) offset(8) payload
-      OPEN request / status
+[IP + fake TCP + flow shim]  or  TCP [+ TLS (Go or browser ClientHello)]  or  UDP  or  IP + flow shim
+  [HTTP header (first bytes / first packets)  |  WebSocket frames  |  HTTP/2 POST stream]
+    [-obfs records   dataLen(2) padLen(1) data padding]
+      muxocket frames   length(4) flag(1) channelID(4) offset(8) payload
+        [pool control channel "zz": slotLen(1) slot nameLen(1) name]
+        OPEN request / status   (mode 2 = SOCKS CONNECT: + len(1) "host:port")
         [encryption handshake, then AEAD records]
           your application's bytes (or len(2)-framed datagrams)
 ```
@@ -561,6 +811,15 @@ server and `'Y'` for server to client.
   `-psk`.
 * **Use a PSK with `-raw` traffic:** the forged addresses are only a
   filter, not authentication.
+* **An open SOCKS5 proxy is an open relay.** Bind `-listen socks5//` to
+  loopback or set `-socks-user`/`-socks-password`, and keep the server's
+  `-socks-allow-dst` as narrow as you can. The default already blocks the
+  server's own and private networks.
+* **`-ws`/`-h2` paths are not secrets on their own.** Anyone who learns
+  the path can complete the upgrade. Authentication still comes from
+  muxocket's handshake and the PSK.
+* **`-obfs` and `-fingerprint` resist classification, not decryption.**
+  Neither one adds secrecy.
 
 ---
 
@@ -571,10 +830,11 @@ server and `'Y'` for server to client.
   the channel buffers. With encryption, `SecureConn.ReadFrom`/`WriteTo`
   seal and open records in place. Datagram framing writes the length header
   in place without copying the payload.
-* **Each local connection gets its own session.** That gives isolation and
-  clean shutdown, but every new connection pays for a transport handshake
-  (plus TLS and the key exchange if enabled). For many short connections,
-  prefer a low-latency path or keep connections long-lived.
+* **Each local connection gets its own session by default.** That gives
+  isolation and clean shutdown, but every new connection pays for a
+  transport handshake (plus TLS and the key exchange if enabled). For many
+  short connections (browsers, SOCKS5), use `-pool N`.
+* **Transport cost** : plain TCP > `-obfs` > `-tls` > `-tls + -ws` >  `-tls + -h2`
 ---
 
 Layout:
@@ -588,6 +848,14 @@ internal/tunnel
   secure.go        end-to-end encryption (hybrid KEX, AEAD records)
   tls.go           TLS configs, pins, SNI rules, self-signed certificates
   http.go          -http camouflage (stream wrappers, flags)
+  ws.go            -ws WebSocket transport (upgrade, framing)
+  h2.go            -h2 HTTP/2 transport (client stream, server listener, fallback proxy)
+  utls.go          -fingerprint browser ClientHellos (uTLS)
+  fallback.go      -fallback probe vetting and replay
+  obfs.go          -obfs padding / jitter / chaff record layer
+  pool.go          -pool control-channel protocol and slot labels
+  socks.go         SOCKS5 server handshake (client side)
+  socks_policy.go  -socks-allow-dst rules and checked dialing
   pipe.go          stream / message / datagram pumps
   ipflow.go        raw-IP flow shim
   spoof*.go        -raw spoofing transport and fake TCP (Linux)
