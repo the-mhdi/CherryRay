@@ -840,8 +840,8 @@ server and `'Y'` for server to client.
 Layout:
 
 ```
-cmd/CherryRayServer  server: transports, channel specs, pool control, OPEN handling, forwarding
-cmd/CherryRayClient  client: listeners, SOCKS5, session pool, flows, connect/resume
+cmd/CherryRayServer      server: transports, channel specs, OPEN handling, forwarding
+cmd/CherryRayClient      client: listeners, flows, connect/resume
 internal/tunnel
   endpoint.go      NET//ADDR endpoints, transports, dialers
   open.go          OPEN request / status
